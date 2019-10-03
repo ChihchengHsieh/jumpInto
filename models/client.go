@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"jumpInto/database"
+	"jumpInto/utils"
 	"log"
 	"net/http"
 	"time"
@@ -38,14 +39,14 @@ var (
 )
 
 type Client struct {
-	ID       primitive.ObjectID `json:"_id" bson:"_id,omitempty"`
-	Email    string             `json:"email" bson:"email"`
-	Password string             `json:"password" bson:"password"`
-	Role     string             `json:"role" bson:"role"`
-	Socket   *websocket.Conn    `json:"-" bson:"-"`
-	name     string             `json:"name" bson:"name"`
-	Send     chan *Message      `json:"-" bson:"-"`
-	Rooms    map[string]*Room   `json:"rooms" bson:"rooms"` //The Room that the client living in
+	ID       primitive.ObjectID   `json:"_id" bson:"_id,omitempty"`
+	Email    string               `json:"email" bson:"email"`
+	Password string               `json:"password" bson:"password"`
+	Role     string               `json:"role" bson:"role"`
+	Socket   *websocket.Conn      `json:"-" bson:"-"`
+	Name     string               `json:"name" bson:"name"`
+	Send     chan *Message        `json:"-" bson:"-"`
+	Rooms    []primitive.ObjectID `json:"rooms" bson:"rooms"` //The Room that the client living in
 }
 
 var upgrader = websocket.Upgrader{
@@ -69,8 +70,8 @@ func HandleData(c *Client, msg *Message) {
 		c.Emit(msg)
 	case "LEFT": // send message to notify that someone has left
 		c.Emit(msg)
+
 		room := RoomManager[msg.Destination]
-		delete(room.Members, c.ID.String())
 		if len(room.Members) == 0 {
 			room.Stop()
 		}
@@ -80,10 +81,33 @@ func HandleData(c *Client, msg *Message) {
 		case "ROOM":
 			if dst, ok := RoomManager[msg.Destination]; ok {
 				dst.Send <- msg
+			} else {
+				room, err := FindRoomByID(msg.Destination)
+				if err != nil {
+					log.Println(err)
+				}
+				RoomManager[room.ID.String()] = room
+				err = AddMessageToDB(msg)
+				if err != nil {
+					log.Println(err)
+				}
+				room.Send <- msg
 			}
 		case "CLIENT":
 			if dst, ok := ClientManager[msg.Destination]; ok {
 				dst.Send <- msg
+			} else {
+				client, err := FindClientByID(msg.Destination)
+				if err != nil {
+					log.Println(err)
+				}
+				ClientManager[client.ID.String()] = client
+				err = AddMessageToDB(msg)
+				if err != nil {
+					log.Println(err)
+				}
+
+				// In doesn't have websocket in this case
 			}
 
 		default:
@@ -109,8 +133,8 @@ func HandleData(c *Client, msg *Message) {
 
 func (c *Client) readPump() {
 	defer func() {
-		for _, room := range c.Rooms {
-			room.Leave(c)
+		for _, roomID := range c.Rooms {
+			RoomManager[roomID.String()].Leave(c)
 		}
 		c.Socket.Close()
 	}()
@@ -168,31 +192,95 @@ func (c *Client) writePump() {
 }
 
 // Adds the Conn to a Room. If the Room does not exist, it is created.
-func (c *Client) Join(name string) {
+func (c *Client) Join(id string) {
 	var room *Room
+	var err error
 
-	if _, ok := RoomManager[name]; ok {
+	// Checking if we can find the existing room
+	if _, ok := RoomManager[id]; ok {
 		// Check with the DB as well
-		room = RoomManager[name]
+		room = RoomManager[id]
 	} else {
-
-		room = NewRoom(name) // if the room doen't exist, then create a new one
+		// Create a room if the room doesn't exist
+		room, err = FindRoomByID(id)
+		if err != nil {
+			log.Println(err)
+		}
+		// room = NewRoom(id)
 	}
-	c.Rooms[name] = room // the rooms that client is living in
-	room.Join(c)         // bi-directional binding
+
+	////////////////// Update the DB
+	_, err = AddClientToRoomByID(room.ID.String(), c)
+
+	if err != nil {
+		log.Println(err) // We can send error throguh websocket
+	}
+
+	_, err = AddRoomToClientByID(c.ID.String(), room)
+
+	if err != nil {
+		log.Println(err) // We can send error throguh websocket
+	}
+
+	// Update Current Server
+	room.Members = append(room.Members, c.ID)
+	c.Rooms = append(c.Rooms, room.ID)
+	RoomManager[id] = room
+
+	room.Join(c) // bi-directional binding
 }
 
 // Removes the Conn from a Room.
-func (c *Client) Leave(name string) {
-	if room, ok := RoomManager[name]; ok {
-		delete(c.Rooms, name)
-		room.Leave(c)
+func (c *Client) Leave(id string) {
+
+	var room *Room
+	var ok bool
+
+	if room, ok = RoomManager[id]; ok {
+		// Checking if we have this room in currentServer
+		room = RoomManager[id]
+
+	} else {
+
+		// If we don't have this room, we retrieve from db
+		room, err := FindRoomByID(id)
+		if err != nil {
+			log.Println(err)
+		}
+		RoomManager[id] = room
 	}
+
+	// Removing from the current Server
+	room.Members = utils.DeleteAnElementFromArrayObjectID(c.ID, room.Members)
+	c.Rooms = utils.DeleteAnElementFromArrayObjectID(room.ID, c.Rooms)
+
+	// Removing from the database
+	_, err := DeleteClientFromMemberByID(room.ID.String(), c.ID.String())
+
+	if err != nil {
+		log.Println(err)
+	}
+
+	_, err = DeleteRoomFromClientByID(c.ID.String(), room.ID.String())
+	if err != nil {
+		log.Println(err)
+	}
+
+	room.Leave(c)
 }
 
 // Broadcasts a Message to all members of a Room.
 func (c *Client) Emit(msg *Message) {
+	// If we are having this Room in current server
 	if room, ok := RoomManager[msg.Destination]; ok {
+		room.Emit(msg)
+	} else {
+		// Else we retrieve it from the database
+		room, err := FindRoomByID(msg.Destination)
+		if err != nil {
+			log.Println(err)
+		}
+		RoomManager[msg.Destination] = room
 		room.Emit(msg)
 	}
 }
@@ -204,7 +292,6 @@ func NewConnection(w http.ResponseWriter, r *http.Request, client *Client) error
 		log.Println(err)
 		return err
 	}
-	// id, err := uuid.NewRandom(), we expect to see the user
 
 	if err != nil {
 		log.Println(err)
@@ -212,7 +299,6 @@ func NewConnection(w http.ResponseWriter, r *http.Request, client *Client) error
 	}
 
 	client.Socket = socket
-	client.Send = make(chan *Message)
 
 	ClientManager[client.ID.String()] = client
 
@@ -237,10 +323,50 @@ func SocketHandler(w http.ResponseWriter, r *http.Request, client *Client) error
 
 }
 
-/*	Saving Content
-	1. Rooms
+func AddRoomToClientByID(id string, inputRoom *Room) (interface{}, error) {
+	oid, err := primitive.ObjectIDFromHex(id)
 
-*/
+	if err != nil {
+		log.Println(err)
+		return nil, err
+
+	}
+
+	result, err := database.DB.Collection("client").UpdateOne(context.TODO(),
+		bson.M{"_id": oid},
+		bson.M{"$push": bson.M{"rooms": inputRoom.ID}},
+	)
+
+	if err != nil {
+		log.Println(err)
+		return nil, err
+	}
+
+	return result.UpsertedID, nil
+}
+
+func DeleteRoomFromClientByID(clientID string, roomID string) (interface{}, error) {
+
+	clientOID, err := primitive.ObjectIDFromHex(clientID)
+	if err != nil {
+		return nil, err
+	}
+
+	roomOID, err := primitive.ObjectIDFromHex(roomID)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := database.DB.Collection("client").UpdateOne(context.TODO(),
+		bson.M{"_id": clientOID},
+		bson.M{"$pull": bson.M{"rooms": roomOID}})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return result.UpsertedID, nil
+}
 
 func AddClient(inputClient *Client) (interface{}, error) {
 	result, err := database.DB.Collection("client").InsertOne(context.TODO(), inputClient)
@@ -274,6 +400,8 @@ func FindClientByID(id string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	client.Send = make(chan *Message)
 	return client, nil
 }
 
@@ -285,6 +413,8 @@ func FindClientByEmail(email string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	client.Send = make(chan *Message)
 	return client, nil
 }
 
@@ -318,6 +448,7 @@ func FindClients(filterDetail bson.M) ([]*Client, error) {
 		if err != nil {
 			return nil, err
 		}
+		elem.Send = make(chan *Message)
 		clients = append(clients, &elem)
 	}
 	return clients, nil

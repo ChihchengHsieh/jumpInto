@@ -3,11 +3,13 @@ package apis
 import (
 	"jumpInto/models"
 	"jumpInto/utils"
+	"log"
 	"net/http"
 	"os"
 
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"github.com/gin-gonic/gin"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -15,6 +17,8 @@ import (
 func SignupClient(c *gin.Context) {
 	// Extract required fields, including "email", "password" and "code"
 	email, password, code := c.PostForm("email"), c.PostForm("password"), c.PostForm("code")
+
+	log.Println("In the singup client")
 
 	// Checking if the password or password is empty
 	if email == "" || password == "" {
@@ -28,14 +32,14 @@ func SignupClient(c *gin.Context) {
 	}
 
 	// Checking if the register code is correct
-	if code != os.Getenv("REGISTER_CODE") && code != os.Getenv("ADMIN_REGISTER_CODE") {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"err":  "The Given Rigister Code is not correct",
-			"msg":  "The Given Rigister Code is not correct",
-			"code": code,
-		})
-		return
-	}
+	// if code != os.Getenv("REGISTER_CODE") && code != os.Getenv("ADMIN_REGISTER_CODE") {
+	// 	c.JSON(http.StatusBadRequest, gin.H{
+	// 		"err":  "The Given Rigister Code is not correct",
+	// 		"msg":  "The Given Rigister Code is not correct",
+	// 		"code": code,
+	// 	})
+	// 	return
+	// }
 	// Checking if the client already exist
 	if client, err := models.FindClientByEmail(email); client != nil {
 		c.JSON(http.StatusConflict, gin.H{
@@ -68,6 +72,8 @@ func SignupClient(c *gin.Context) {
 		Email:    email,
 		Password: string(hashedPassword),
 		Role:     role,
+		Name:     "",
+		Rooms:    []primitive.ObjectID{},
 	}
 
 	// Add this Client
@@ -141,6 +147,81 @@ func LoginClient(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"token":  authToken,
+		"client": client,
+	})
+
+}
+
+func GetTheRoomsOfClient(c *gin.Context) {
+
+	var client *models.Client
+	var err error
+
+	cid := c.Param("cid")
+
+	if cid == "" {
+		clientStr, ok := c.Get("client")
+		if !ok {
+			raw, err := c.GetRawData()
+			c.JSON(http.StatusBadRequest, gin.H{
+				"err":     err,
+				"msg":     "Cannot find the room",
+				"cid":     cid,
+				"ReqBody": raw,
+			})
+			return
+		}
+
+		client = clientStr.(*models.Client)
+		cid = client.ID.String()
+	} else {
+		client, err = models.FindClientByID(cid)
+		if err != nil {
+			raw, err := c.GetRawData()
+			c.JSON(http.StatusBadRequest, gin.H{
+				"err":     err,
+				"msg":     "Cannot find rooms for given user",
+				"cid":     cid,
+				"ReqBody": raw,
+			})
+			return
+		}
+
+	}
+
+	rooms, err := models.FindRooms(bson.M{"_id": bson.M{"$in": client.Rooms}})
+	if err != nil {
+		raw, err := c.GetRawData()
+		c.JSON(http.StatusBadRequest, gin.H{
+			"err":     err,
+			"msg":     "Cannot find rooms for given user",
+			"cid":     cid,
+			"ReqBody": raw,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"rooms": rooms,
+		"cid":   cid,
+	})
+}
+
+func GetClientByID(c *gin.Context) {
+	cid := c.Param("cid")
+	client, err := models.FindClientByID(cid)
+	if err != nil {
+		raw, err := c.GetRawData()
+		c.JSON(http.StatusBadRequest, gin.H{
+			"err":     err,
+			"msg":     "Cannot find rooms for given user",
+			"cid":     cid,
+			"ReqBody": raw,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
 		"client": client,
 	})
 

@@ -2,7 +2,9 @@ package main
 
 import (
 	"jumpInto/database"
+	"jumpInto/routers"
 
+	"github.com/gin-gonic/gin"
 	_ "github.com/joho/godotenv/autoload"
 )
 
@@ -10,10 +12,10 @@ func main() {
 
 	// bindAfdress := "localhost:8000"
 
-	// gin.ForceConsoleColor()
+	gin.ForceConsoleColor()
 	database.InitDB()
-	// r := routers.InitRouter()
-	// r.Run()
+	r := routers.InitRouter()
+	r.Run()
 
 	// Testting Area
 

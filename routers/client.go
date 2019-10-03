@@ -1,7 +1,7 @@
 package routers
 
 import (
-	"blog/apis"
+	"jumpInto/apis"
 
 	"github.com/gin-gonic/gin"
 )
@@ -10,7 +10,9 @@ import (
 func UserRouterInit(router *gin.Engine) {
 	userRouter := router.Group("/user")
 	{
-		userRouter.POST("/signup", apis.SignupUser)
-		userRouter.POST("/login", apis.LoginUser)
+		userRouter.POST("/signup", apis.SignupClient)
+		userRouter.POST("/login", apis.LoginClient)
+		userRouter.GET("/single/:cid/rooms", apis.GetClientByID)
+
 	}
 }

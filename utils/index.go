@@ -3,6 +3,8 @@ package utils
 import (
 	"os"
 
+	"go.mongodb.org/mongo-driver/bson/primitive"
+
 	"github.com/dgrijalva/jwt-go"
 )
 
@@ -33,6 +35,24 @@ func StringInSlice(a string, list []string) bool {
 		}
 	}
 	return false
+}
+
+func DeleteAnElementFromArrayObjectID(element primitive.ObjectID, array []primitive.ObjectID) []primitive.ObjectID {
+	var idx = -1
+
+	for i, e := range array {
+		if e == element {
+			idx = i
+			break
+		}
+	}
+
+	if idx == -1 {
+		return array
+	}
+
+	return append(array[:idx], array[idx+1:]...)
+
 }
 
 func GenerateChatNameForTwoUsers(idA string, idB string) string {

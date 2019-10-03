@@ -23,7 +23,7 @@ type Message struct {
 	To            string             `json:"to" bson:"to"`
 }
 
-func AddMessageToDB(msg *Message) {
+func AddMessageToDB(msg *Message) error {
 	//  should contain source and destination
 
 	var chatHistName string
@@ -44,11 +44,18 @@ func AddMessageToDB(msg *Message) {
 
 	updateOption.Upsert = &upsertOption
 
-	database.DB.Collection("chatHist").UpdateOne(context.TODO(),
+	_, err := database.DB.Collection("chatHist").UpdateOne(context.TODO(),
 		bson.M{"name": chatHistName},
 		bson.M{"$push": bson.M{"messages": msg}},
 		updateOption,
 	)
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+
 }
 
 func DeleteMessageFromByID(id string) error {

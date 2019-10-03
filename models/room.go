@@ -12,13 +12,13 @@ import (
 )
 
 type Room struct {
-	ID        primitive.ObjectID `json:"_id" bson:"_id"`
-	Name      string             `json:"name" bson:"name"`       // Name of the room
-	Members   map[string]*Client `json:"members" bson:"members"` // Members of client in this room
-	StopChan  chan bool          `json:"-" bson:"-"`             // Meaning of this?
-	JoinChan  chan *Client       `json:"-" bson:"-"`
-	LeaveChan chan *Client       `json:"-" bson:"-"`
-	Send      chan *Message      `json:"-" bson:"-"`
+	ID        primitive.ObjectID   `json:"_id" bson:"_id"`
+	Name      string               `json:"name" bson:"name"`       // Name of the room
+	Members   []primitive.ObjectID `json:"members" bson:"members"` // Members of client in this room
+	StopChan  chan bool            `json:"-" bson:"-"`             // Meaning of this?
+	JoinChan  chan *Client         `json:"-" bson:"-"`
+	LeaveChan chan *Client         `json:"-" bson:"-"`
+	Send      chan *Message        `json:"-" bson:"-"`
 }
 
 var RoomManager = make(map[string]*Room)
@@ -44,19 +44,28 @@ func (r *Room) Emit(m *Message) {
 
 // Creates a new Room type and starts it.
 func NewRoom(name string) *Room {
+
+	// Check if we can find a room in database
+
 	r := &Room{
 		Name:      name,
-		Members:   make(map[string]*Client),
+		Members:   []primitive.ObjectID{},
 		StopChan:  make(chan bool),
 		JoinChan:  make(chan *Client),
 		LeaveChan: make(chan *Client),
 		Send:      make(chan *Message),
 	}
 
-	if oldR, ok := RoomManager[name]; ok {
-		r.Members = oldR.Members // Keep the members data
-	}
+	// Check it from outside
+	// if oldR, ok := RoomManager[name]; ok {
+	// 	r.Members = oldR.Members // Keep the members data
+	// }
 
+	InsertedID, err := AddRoom(r)
+	if err != nil {
+		log.Println(err)
+	}
+	r.ID = InsertedID.(primitive.ObjectID)
 	RoomManager[name] = r
 	go r.Start()
 	return r
@@ -67,6 +76,19 @@ func AddRoom(newRoom *Room) (interface{}, error) {
 	// Accepting the room but only save as the Members
 	result, err := database.DB.Collection("room").InsertOne(context.TODO(), newRoom)
 	return result.InsertedID, err
+}
+
+func DeleteRoom(id string) error {
+	oid, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return err
+	}
+	_, err = database.DB.Collection("room").DeleteOne(context.TODO(), bson.M{"_id": oid})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func UpdateRoomByID(id string, updateDetail map[string]interface{}) (interface{}, error) {
@@ -101,6 +123,11 @@ func FindRoomByID(id string) (*Room, error) {
 	if err != nil {
 		return nil, err
 	}
+	room.StopChan = make(chan bool)
+	room.JoinChan = make(chan *Client)
+	room.LeaveChan = make(chan *Client)
+	room.Send = make(chan *Message)
+
 	return room, nil
 }
 
@@ -166,7 +193,7 @@ func UpdateClientToRoomByID(roomID string, clientID string, newClient *Client) (
 }
 
 func DeleteClientFromMemberByID(roomID string, clientID string) (interface{}, error) {
-	memebrOid, err := primitive.ObjectIDFromHex(roomID)
+	roomOID, err := primitive.ObjectIDFromHex(roomID)
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +204,7 @@ func DeleteClientFromMemberByID(roomID string, clientID string) (interface{}, er
 	}
 
 	result, err := database.DB.Collection("room").UpdateOne(context.TODO(),
-		bson.M{"_id": memebrOid},
+		bson.M{"_id": roomOID},
 		bson.M{"$pull": bson.M{"members": bson.M{"_id": clientOid}}})
 
 	if err != nil {
@@ -194,7 +221,7 @@ func (r *Room) Start() {
 	for {
 		select {
 		case c := <-r.JoinChan:
-			r.Members[c.ID.String()] = c
+
 			c.Send <- &Message{
 				Action:        "JOINED",
 				Destination:   r.Name,
@@ -204,29 +231,30 @@ func (r *Room) Start() {
 				To:            "CLIENT",
 			}
 		case c := <-r.LeaveChan:
-			if _, ok := r.Members[c.ID.String()]; ok {
-				delete(r.Members, c.ID.String())
-				c.Send <- &Message{
-					Action:        "LEFT",
-					Destination:   r.Name,
-					PayLoad:       "You have left the room",
-					SendiningTime: time.Now(),
-					Source:        "System",
-					To:            "CLIENT",
-				}
+
+			c.Send <- &Message{
+				Action:        "LEFT",
+				Destination:   r.Name,
+				PayLoad:       "You have left the room",
+				SendiningTime: time.Now(),
+				Source:        "System",
+				To:            "CLIENT",
 			}
+
 		case msg := <-r.Send:
-			for id, c := range r.Members {
-				if c.ID.String() == msg.Source {
+			// we store the message to server
+			for _, cid := range r.Members {
+				if cid.String() == msg.Source {
 					continue
 				}
-				select {
-				case c.Send <- msg:
-				default:
-					delete(r.Members, id)
-					close(c.Send)
+
+				// If the client is on the server, then we use websocket to pass the meesage
+				if client, ok := ClientManager[cid.String()]; ok {
+					client.Send <- msg
 				}
+
 			}
+
 		case <-r.StopChan:
 			delete(RoomManager, r.Name)
 			return
